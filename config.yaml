@@ -1,0 +1,57 @@
+# Configuración de tablas. Las credenciales NO van aquí: van en .env (ver .env.example).
+defaults:
+  lote: 5000               # filas por lote (fetchmany / executemany)
+  tolerancia_filas: 0      # diferencia admitida entre origen y cargadas
+  max_caida_pct: 50        # aborta si el origen tiene N% menos filas que el destino actual
+  vaciado: truncate        # truncate | delete (usar delete si no hay permiso TRUNCATE)
+  encoding: cp1252
+  limpiar_al_final: false  # true: vacía la tabla destino al terminar BIEN (en "todas", al final del proceso). Por tabla se puede cambiar;
+                           # la opción --limpiar-al-final / --no-limpiar-al-final de la línea de comandos manda sobre esto.
+
+# Parámetros sustituidos en el SQL de origen (@@NOMBRE@@). Solo enteros separados por coma.
+# Se pueden sobreescribir con variables de entorno PRODUCTOS_GRUPOA / PRODUCTOS_GRUPOB.
+parametros:
+  PROD_A: "31,71,114,4,14,15,16,27,30,32,33,81,82,85,86,87,92,94,101,113,128,129,130,277,332,334,350"
+  PROD_B: "35,22,225"
+
+# Orden de carga (equivale a MASTER_ETL del SSIS).
+orden: [TERCEROS, DATOSADICIONALES, PRODUCTOS, TIPSTRAN, TRANSACCIONES]
+
+# Staging: por defecto es una tabla temporal creada con la estructura de la tabla destino
+# (no hay que crear tablas STG_*). Para usar una tabla fija: staging: VIGIA.STG_X
+tablas:
+  TERCEROS:
+    sql: sql/origen/terceros.sql
+    destino: VIGIA.TMP_TERCEROS
+    clave: [TIPIDE_CODIGO, NUMIDE]
+    fechas: [FECHAVINCULACION, FECHAACTUALIZACION, FECHA_NACIMIENTO]
+    a_texto: [SUCURSAL_CODIGO]      # el origen mezcla número y texto ('' -> 1)
+
+  DATOSADICIONALES:
+    sql: sql/origen/datosadicionales.sql
+    destino: VIGIA.TMP_DATOSADICIONALESTERCERO
+    clave: [TERCERO_TIPIDE_CODIGO, TERCERO_NUMIDE, TIPODATOADICIONAL_CODIGO]
+
+  PRODUCTOS:
+    sql: sql/origen/productos.sql
+    destino: VIGIA.TMP_PRODUCTOSTERCERO
+    clave: [TERCERO_TIPIDE_CODIGO, TERCERO_NUMIDE, PRODUCTO_CODIGO, NUMERO]
+    fechas: [FECHAAPERTURA]
+    a_texto: [SUCURSAL_CODIGO]
+
+  TIPSTRAN:
+    sql: sql/origen/tipstran.sql
+    destino: VIGIA.TMP_TIPSTRAN
+    clave: [CODIGO]
+
+  # Origen: PSA067 (script de Archivos_SQL/Origen_PSA003.txt). Tabla grande: no se cuenta el origen aparte
+  # (el SELECT con UNION se ejecutaría dos veces) y no se revisan claves duplicadas.
+  TRANSACCIONES:
+    sql: sql/origen/transacciones.sql
+    destino: VIGIA.TMP_TRANSACCIONES
+    contar_origen: false
+    fechas: [FECHA]
+    # Conversión pedida en el SSIS: PRODUCTO_NUMERO a string(20) e INTERMEDIARIO_CODIGO a string(30).
+    a_texto: [PRODUCTO_NUMERO, INTERMEDIARIO_CODIGO, SUCURSAL_CODIGO]
+    texto_max: {PRODUCTO_NUMERO: 20, INTERMEDIARIO_CODIGO: 30}
+    lote: 20000

@@ -1,0 +1,14 @@
+.env
+dev_data/
+logs/
+__pycache__/
+.pytest_cache/
+*.lock
+
+# Generados / locales
+installer/build/
+installer/dist/
+.claude/
+UpgradeLog.htm
+*.zip
+*.bak_*

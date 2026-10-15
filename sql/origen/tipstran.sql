@@ -1,0 +1,10 @@
+select psa068co CODIGO, 
+psa068ds NOMBRE, 
+psa068na NATURALEZA, 
+psa068ef MANEJAEFECTIVO, 
+psa068in INCLUIR, 
+psa068im INCLUIRMOV, 
+psa068ap ANALISISPERFIL, 
+psa068am ALERTAMANDATORIA
+from GNBWEB_DB.psa068 
+where psa068st = 'A'

@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Panel ETL VIGIA</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--tx:#1d2330;--mut:#667085;--bd:#e3e6ec;--ok:#0f8a4f;--err:#c62828;--run:#1a5fd0;--pen:#8a93a3;--warn:#b26a00}
+@media (prefers-color-scheme:dark){:root{--bg:#12151b;--card:#1b2029;--tx:#e8ebf1;--mut:#9aa3b2;--bd:#2c3340;--ok:#4cc38a;--err:#ff6b6b;--run:#6ea8ff;--pen:#7b8494;--warn:#e6a23c}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.45 system-ui,Segoe UI,Roboto,sans-serif}
+main{max-width:1100px;margin:0 auto;padding:16px}
+header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:12px}
+h1{font-size:18px;margin:0}
+h2{font-size:14px;margin:0 0 8px;color:var(--mut);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;color:var(--mut);font-size:13px}
+select,input,button{font:inherit;color:var(--tx);background:var(--card);border:1px solid var(--bd);border-radius:6px;padding:4px 8px}
+button{cursor:pointer}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:14px;margin-bottom:12px}
+.glob{display:flex;flex-wrap:wrap;gap:16px;align-items:center;justify-content:space-between}
+.big{font-size:20px;font-weight:700}
+.prog{height:8px;background:var(--bd);border-radius:99px;overflow:hidden;margin-top:10px}
+.prog>i{display:block;height:100%;background:var(--run);transition:width .4s}
+.tablas{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
+.t{border:1px solid var(--bd);border-left-width:5px;border-radius:8px;padding:10px;background:var(--card)}
+.t b{display:block}.t small{color:var(--mut)}
+.s-ok{border-left-color:var(--ok)}.s-error,.s-abortado{border-left-color:var(--err)}
+.s-curso{border-left-color:var(--run)}.s-pendiente{border-left-color:var(--pen)}.s-dry{border-left-color:var(--warn)}
+.tag{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;font-weight:600;border:1px solid currentColor}
+.c-ok{color:var(--ok)}.c-error,.c-abortado{color:var(--err)}.c-curso,.c-inicio{color:var(--run)}.c-pendiente{color:var(--pen)}.c-dry{color:var(--warn)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--bd);vertical-align:top}
+th{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card)}
+.wrap{max-height:420px;overflow:auto}
+td.d{word-break:break-word;max-width:520px}
+.err{color:var(--err);padding:8px 0}
+@media (max-width:640px){td.d{max-width:240px}}
+</style>
+</head>
+<body>
+<main>
+<header>
+  <h1>ETL VIGIA · seguimiento</h1>
+  <div class="bar">
+    <label>Corrida <select id="corrida"></select></label>
+    <label><input type="checkbox" id="auto" checked> actualizar cada 10 s</label>
+    <button id="ahora">Actualizar</button>
+    <span id="gen">—</span>
+  </div>
+</header>
+<div id="error" class="err" hidden></div>
+
+<section class="card">
+  <h2>Proceso masivo</h2>
+  <div class="glob">
+    <div><div class="big" id="g-estado">—</div><div id="g-det" class="bar"></div></div>
+    <div id="g-n" class="big">—</div>
+  </div>
+  <div class="prog"><i id="g-bar" style="width:0"></i></div>
+</section>
+
+<section class="card">
+  <h2>Tablas</h2>
+  <div class="tablas" id="tablas"></div>
+</section>
+
+<section class="card">
+  <h2>Corridas recientes</h2>
+  <div class="wrap" style="max-height:200px"><table><thead><tr><th>Corrida</th><th>Inicio</th><th>Estado</th><th>Tablas</th><th>Duración</th></tr></thead><tbody id="hist"></tbody></table></div>
+</section>
+
+<section class="card">
+  <h2>Tiempos exactos por ejecución (uPROCESOS)</h2>
+  <div class="wrap"><table><thead><tr><th>Proceso</th><th>Estado</th><th>Inicio</th><th>Fin</th><th>Duración</th>
+    <th>Origen</th><th>Staging</th><th>Destino</th><th>Filas</th><th>Filas/s</th></tr></thead><tbody id="exacto"></tbody></table></div>
+  <div class="bar" id="exacto-nota" style="margin-top:6px"></div>
+</section>
+
+<section class="card">
+  <h2>Registro (ERRORESPROCESO)</h2>
+  <div class="bar" style="margin-bottom:8px">
+    <select id="f-estado"><option value="">todos los estados</option></select>
+    <select id="f-proceso"><option value="">todos los procesos</option></select>
+    <input id="f-txt" placeholder="buscar texto" size="22">
+    <label><input type="checkbox" id="f-corrida" checked> solo la corrida elegida</label>
+  </div>
+  <div class="wrap"><table><thead><tr><th>Fecha</th><th>Proceso</th><th>Estado</th><th>Detalle</th><th>Usuario</th></tr></thead><tbody id="log"></tbody></table></div>
+</section>
+</main>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let D = null, timer = null;
+
+const corridaDe = t => (/corrida=(\S+)/.exec(t || "") || [])[1] || "";
+const campo = (t, k) => (new RegExp(k + "=(\\S+)").exec(t || "") || [])[1] || "";
+function min(iso) {                       // PT12.50M -> "12,50 min"
+  const m = /^PT([\d.]+)M$/.exec(iso || ""); return m ? Number(m[1]).toFixed(2).replace(".", ",") + " min" : (iso || "—");
+}
+function seg(ms) { const s = Math.max(0, Math.round(ms / 1000)); return Math.floor(s / 60) + " min " + (s % 60) + " s"; }
+const fecha = s => new Date(s);           // hora del servidor, sin zona: ambas fechas se comparan entre sí
+function el(tag, cls, txt) { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; }
+function tag(est) { const k = est.toLowerCase().replace("dry-run", "dry"); return el("span", "tag c-" + k, est); }
+
+function eventos() {                       // PROCESOS -> {corrida: {TODAS:{ini,fin}, TABLA:{ini,fin}}}
+  const c = {};
+  for (const p of D.procesos) {
+    const cor = corridaDe(p.resultado); if (!cor) continue;
+    const n = p.nombre.split(".").pop();
+    const e = ((c[cor] = c[cor] || {})[n] = c[cor][n] || {});
+    if (p.resultado.startsWith("INICIO")) e.ini = p; else if (p.resultado.startsWith("FIN")) e.fin = p;
+  }
+  return c;
+}
+
+function pintar() {
+  if (!D) return;
+  $("error").hidden = !D.error; if (D.error) { $("error").textContent = "No se pudo leer la base: " + D.error; return; }
+  $("gen").textContent = "datos de " + D.generado.replace("T", " ");
+  const ev = eventos();
+  const cors = Object.keys(ev).sort().reverse();
+  const sel = $("corrida"), actual = sel.value;
+  if (sel.options.length !== cors.length || actual === "") {
+    sel.replaceChildren(...cors.map(c => { const o = el("option", "", c + ((ev[c].TODAS) ? " · todas" : " · " + Object.keys(ev[c]).join(","))); o.value = c; return o; }));
+    sel.value = cors.includes(actual) ? actual : (cors[0] || "");
+  }
+  const cor = sel.value, e = ev[cor] || {}, ahora = fecha(D.generado);
+
+  // Global
+  const g = e.TODAS || {};
+  const lista = (g.ini || g.fin) ? D.tablas : D.tablas.filter(t => e[t]);   // corrida de una tabla: solo esa
+  const total = lista.length;
+  const fin = lista.filter(t => (e[t] || {}).fin).length;
+  let est = "Sin datos";
+  if (g.fin) est = campo(g.fin.resultado, "estado") === "OK" ? "Terminado OK" : "Terminado con error";
+  else if (g.ini) est = "En curso";
+  else if (Object.keys(e).length) est = fin === total ? "Tabla individual terminada" : "Tabla individual en curso";
+  $("g-estado").textContent = est;
+  const det = $("g-det"); det.replaceChildren();
+  if (g.ini) det.append(el("span", "", "inicio " + g.ini.fecha.replace("T", " ")));
+  if (g.fin) det.append(el("span", "", "· duración " + min(campo(g.fin.resultado, "duracion"))));
+  else if (g.ini) det.append(el("span", "", "· transcurrido " + seg(ahora - fecha(g.ini.fecha))));
+  $("g-n").textContent = fin + " / " + total + " tablas";
+  $("g-bar").style.width = (total ? 100 * fin / total : 0) + "%";
+
+  // Tablas
+  const box = $("tablas"); box.replaceChildren();
+  for (const t of lista) {
+    const x = e[t] || {}; let s = "Pendiente", info = "";
+    if (x.fin) {
+      s = campo(x.fin.resultado, "estado") || "FIN"; info = min(campo(x.fin.resultado, "duracion"));
+    } else if (x.ini) { s = "En curso"; info = "transcurrido " + seg(ahora - fecha(x.ini.fecha)); }
+    const k = s.toLowerCase().replace("dry-run", "dry").replace("en curso", "curso");
+    const c = el("div", "t s-" + k); c.append(el("b", "", t), tag(s === "En curso" ? "En curso" : s), el("br"), el("small", "", info));
+    box.append(c);
+  }
+
+  // Corridas
+  const h = $("hist"); h.replaceChildren();
+  for (const k of cors.slice(0, 15)) {
+    const gg = (ev[k].TODAS || {}), r = el("tr");
+    const st = gg.fin ? campo(gg.fin.resultado, "estado") : (gg.ini ? "En curso" : "—");
+    const td = el("td"); td.append(st === "—" ? "—" : tag(st));
+    r.append(el("td", "", k), el("td", "", gg.ini ? gg.ini.fecha.replace("T", " ") : "—"), td,
+             el("td", "", gg.fin ? campo(gg.fin.resultado, "tablas") : "—"),
+             el("td", "", gg.fin ? min(campo(gg.fin.resultado, "duracion")) : "—"));
+    h.append(r);
+  }
+
+  // Tiempos exactos (uPROCESOS): hora local del equipo del ETL, ms reales de cada etapa
+  const X = $("exacto"); X.replaceChildren();
+  const ejs = (D.ejecuciones || []).filter(r => r.corrida === cor).sort((a, b) => a.id - b.id);
+  $("exacto-nota").textContent = (D.ejecuciones || []).length ? "Origen = contar + ejecutar SELECT · Staging = lectura + carga · Destino = vaciar + insertar + verificar. Tiempos en ms."
+    : "Sin datos: cree VIGIA.uPROCESOS con sql/destino/uprocesos.sql.";
+  const ms = v => v == null || v === "" ? "—" : Number(v).toLocaleString("es") + " ms";
+  const hora = s => (s || "").replace("T", " ");
+  for (const r of ejs) {
+    const tr = el("tr"), td = el("td"); td.append(tag(r.estado === "EN CURSO" ? "En curso" : r.estado));
+    const dur = (r.ms == null || r.ms === "") ? "—" : ms(r.ms) + " (" + (r.ms / 1000).toFixed(3).replace(".", ",") + " s)";
+    const origen = (r.tipo === "TODAS" || (r.ms_origen === "" && r.ms_ejec === "")) ? null : Number(r.ms_origen || 0) + Number(r.ms_ejec || 0);
+    const rps = r.ms > 0 && r.f_cargadas ? Math.round(r.f_cargadas * 1000 / r.ms).toLocaleString("es") : "—";
+    tr.append(el("td", "", r.proceso.split(".").pop() + (r.tipo === "TODAS" ? " (global)" : "")), td,
+              el("td", "", hora(r.inicio)), el("td", "", hora(r.fin) || "—"), el("td", "", dur),
+              el("td", "", ms(origen)), el("td", "", ms(r.ms_staging)), el("td", "", ms(r.ms_trans)),
+              el("td", "", (r.f_cargadas == null || r.f_cargadas === "") ? "—" : Number(r.f_cargadas).toLocaleString("es")), el("td", "", rps));
+    if (r.estado !== "OK" && r.estado !== "EN CURSO" && r.etapa) tr.title = "Etapa final: " + r.etapa;
+    X.append(tr);
+  }
+
+  // Registro
+  const fe = $("f-estado"), fp = $("f-proceso");
+  llenar(fe, [...new Set(D.errores.map(r => r.estado))], "todos los estados");
+  llenar(fp, [...new Set(D.errores.map(r => r.proceso))], "todos los procesos");
+  const txt = $("f-txt").value.toLowerCase(), solo = $("f-corrida").checked;
+  const L = $("log"); L.replaceChildren();
+  for (const r of D.errores) {
+    if (fe.value && r.estado !== fe.value) continue;
+    if (fp.value && r.proceso !== fp.value) continue;
+    if (solo && cor && corridaDe(r.datos) !== cor) continue;
+    if (txt && !(r.datos + r.proceso + r.estado).toLowerCase().includes(txt)) continue;
+    const tr = el("tr"), td = el("td"); td.append(tag(r.estado));
+    tr.append(el("td", "", r.fecha.replace("T", " ")), el("td", "", r.proceso), td, el("td", "d", r.datos), el("td", "", r.usuario));
+    L.append(tr);
+  }
+}
+function llenar(s, vals, todos) {
+  const v = s.value; s.replaceChildren(Object.assign(el("option", "", todos), {value: ""}),
+    ...vals.sort().map(x => Object.assign(el("option", "", x), {value: x}))); s.value = vals.includes(v) ? v : "";
+}
+
+async function cargar() {
+  try { D = await (await fetch("/datos", {cache: "no-store"})).json(); }
+  catch (x) { D = {error: "sin conexión con el panel"}; }
+  pintar();
+}
+function programar() { clearInterval(timer); if ($("auto").checked) timer = setInterval(() => { if (!document.hidden) cargar(); }, 10000); }
+["corrida", "f-estado", "f-proceso", "f-corrida"].forEach(i => $(i).addEventListener("change", pintar));
+$("f-txt").addEventListener("input", pintar);
+$("auto").addEventListener("change", programar);
+$("ahora").addEventListener("click", cargar);
+cargar(); programar();
+</script>
+</body>
+</html>
