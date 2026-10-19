@@ -8,7 +8,7 @@ Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force "$stage\app", "$stage\pkg\wheels", $dist | Out-Null
 
 # 1) Programa: solo lo necesario para ejecutar (sin dev/, tests/, dev_data/, logs/, .env, *.db, zips).
-Copy-Item "$raiz\main.py", "$raiz\config.yaml", "$raiz\requirements.txt", "$raiz\.env.example", "$raiz\README.md", "$raiz\PLAN_DESARROLLO.md" "$stage\app"
+Copy-Item "$raiz\main.py", "$raiz\config.yaml", "$raiz\requirements.txt", "$raiz\.env.example", "$raiz\config.local.yaml.ejemplo", "$raiz\README.md", "$raiz\PLAN_DESARROLLO.md" "$stage\app"
 Copy-Item "$raiz\etl" "$stage\app\etl" -Recurse
 Copy-Item "$raiz\sql" "$stage\app\sql" -Recurse
 Get-ChildItem "$stage\app" -Recurse -Include '__pycache__' -Directory | Remove-Item -Recurse -Force

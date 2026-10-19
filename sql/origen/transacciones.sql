@@ -14,7 +14,7 @@ select psa067td TERCERO_TIPIDE_CODIGO,
 	psa067pc CODIGOPAISREMITE,
 	'Relacion: '||psa067rl|| ' - Ordinal: '||trim(psa067or)||' - SubOrd: '||trim(psa067os) as REFERENCIA1
 from gnbweb_db.psa067
-where psa067mo in (@@PROD_A@@)
+where psa067mo in (@@PROD_A@@) @@FILTRO_FECHA@@
 union 
 select psa067td TERCERO_TIPIDE_CODIGO,
 	psa067do TERCERO_NUMIDE,
@@ -32,7 +32,7 @@ select psa067td TERCERO_TIPIDE_CODIGO,
 	psa067pc CODIGOPAISREMITE,
 	'Relacion: '||psa067rl|| ' - Ordinal: '||TRIM(psa067or)||' - SubOrd: '||trim(psa067os) as REFERENCIA1
 from gnbweb_db.psa067
-where psa067mo not in (@@PROD_A@@,@@PROD_B@@)
+where psa067mo not in (@@PROD_A@@,@@PROD_B@@) @@FILTRO_FECHA@@
 union
 select psa067td TERCERO_TIPIDE_CODIGO,
 	psa067do TERCERO_NUMIDE,
@@ -49,4 +49,4 @@ select psa067td TERCERO_TIPIDE_CODIGO,
 	'CAN-'||trim(psa067ca) INTERMEDIARIO_CODIGO,
 	psa067pc CODIGOPAISREMITE,
 	'Relacion: '||psa067rl|| ' - Ordinal: '||trim(psa067or)||' - SubOrd: '||trim(psa067os) as REFERENCIA1
-from gnbweb_db.psa067 where psa067mo in (@@PROD_B@@)
+from gnbweb_db.psa067 where psa067mo in (@@PROD_B@@) @@FILTRO_FECHA@@

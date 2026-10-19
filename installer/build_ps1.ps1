@@ -18,7 +18,7 @@ $b64w = [Convert]::ToBase64String([IO.File]::ReadAllBytes("$pkg\wheels.zip"))
 $cabecera = @'
 
 # Instalador autocontenido de etl_vigia_py (sin bases de datos). Ejecutar desde PowerShell como administrador:
-#   powershell -ExecutionPolicy Bypass -File .\Instalar_etl_vigia_py.ps1 [-Destino C:\ETL\etl_vigia_py] [-SinWinget]
+#   powershell -ExecutionPolicy Bypass -File .\Instalar_etl_vigia_py.ps1 [-Destino C:\ETL\etl_vigia_py] [-SinWinget] [-SinPanel] [-PuertoPanel 8765] [-QuitarPanel]
 $aqui = Join-Path $env:TEMP ('etl_vigia_setup_' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force $aqui | Out-Null
 $esAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)

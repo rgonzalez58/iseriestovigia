@@ -1,6 +1,8 @@
 -- PROPUESTA (no registrada en config.yaml; el script vigente es transacciones.sql, idéntico a Origen_PSA003.txt).
--- Una sola lectura de psa067 en lugar de tres. Mismas columnas, mismos alias y mismos valores.
+-- Una sola lectura de psa067 en lugar de tres (con filtro por fecha, un recorrido en vez de tres). Mismas columnas, mismos alias y mismos valores.
 -- Variante A (esta): DISTINCT conserva la semántica del UNION original (elimina filas exactamente iguales).
+-- 'psa067mo is not null': el original excluye NULL en las tres ramas (IN / NOT IN con NULL no devuelve filas).
+-- (No poner comentarios al final de la última línea: el programa envuelve el SQL en un COUNT.)
 -- Variante B: quitar la palabra DISTINCT (equivale a UNION ALL); solo si el diagnóstico 3 de
 --             diagnostico_psa067.sql confirma que no hay filas duplicadas en el origen.
 select distinct psa067td TERCERO_TIPIDE_CODIGO,
@@ -21,4 +23,4 @@ select distinct psa067td TERCERO_TIPIDE_CODIGO,
 	psa067pc CODIGOPAISREMITE,
 	'Relacion: '||psa067rl|| ' - Ordinal: '||trim(psa067or)||' - SubOrd: '||trim(psa067os) as REFERENCIA1
 from gnbweb_db.psa067
-where psa067mo is not null      -- el original excluye NULL en las tres ramas (IN / NOT IN con NULL no devuelve filas)
+where psa067mo is not null @@FILTRO_FECHA@@

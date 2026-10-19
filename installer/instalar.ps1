@@ -1,11 +1,27 @@
 # Instalador de etl_vigia_py (sin bases de datos). Se ejecuta desde Setup_etl_vigia_py.exe o directamente.
-# Uso: powershell -ExecutionPolicy Bypass -File instalar.ps1 [-Destino C:\ETL\etl_vigia_py] [-SinWinget]
+# Uso: powershell -ExecutionPolicy Bypass -File instalar.ps1 [-Destino C:\ETL\etl_vigia_py] [-SinWinget] [-SinPanel] [-PuertoPanel 8765] [-QuitarPanel]
 param(
     [string]$Destino = 'C:\ETL\etl_vigia_py',
+    [int]$PuertoPanel = 8765,
+    [switch]$SinPanel,
+    [switch]$QuitarPanel,
     [switch]$SinWinget
 )
 $ErrorActionPreference = 'Stop'
 $aqui = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+$tareaPanel = 'ETL_VIGIA_Panel'
+function Es-Admin { ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
+function Detener-Panel {
+    if (Get-ScheduledTask -TaskName $tareaPanel -ErrorAction SilentlyContinue) { Stop-ScheduledTask -TaskName $tareaPanel -ErrorAction SilentlyContinue }
+}
+
+if ($QuitarPanel) {
+    Detener-Panel
+    Unregister-ScheduledTask -TaskName $tareaPanel -Confirm:$false -ErrorAction SilentlyContinue
+    Write-Host "Tarea $tareaPanel eliminada"
+    return
+}
 
 function Paso($m) { Write-Host "`n== $m" -ForegroundColor Cyan }
 function Aviso($m) { Write-Host "AVISO: $m" -ForegroundColor Yellow }
@@ -35,14 +51,15 @@ if (-not $py) { throw 'No se encontro Python 3.10 o superior. Instale Python des
 Write-Host "Python: $py"
 & $py -c "import sys,struct;print('Version', sys.version.split()[0], '-', struct.calcsize('P')*8, 'bits')"
 
+Detener-Panel      # libera los archivos del entorno virtual si el panel estaba en marcha
 Paso "Copiando programa a $Destino"
 $zip = Join-Path $aqui 'payload.zip'
 if (-not (Test-Path $zip)) { throw "Falta payload.zip junto al instalador" }
 $tmp = Join-Path $env:TEMP ('etl_vigia_' + [guid]::NewGuid().ToString('N'))
 Expand-Archive -Path $zip -DestinationPath $tmp -Force
 New-Item -ItemType Directory -Force $Destino | Out-Null
-# .env local se conserva. config.yaml: se instala siempre el correcto; si el existente es distinto,
-# queda respaldado como config.yaml.bak_<fecha>.
+# .env y config.local.yaml (ajustes propios del equipo) se conservan siempre. config.yaml es de la version y se
+# reemplaza; si el existente es distinto queda respaldado como config.yaml.bak_<fecha>.
 $dst = Join-Path $Destino 'config.yaml'
 if (Test-Path $dst) {
     $h1 = (Get-FileHash $dst).Hash; $h2 = (Get-FileHash (Join-Path $tmp 'config.yaml')).Hash
@@ -91,6 +108,9 @@ if ($ibm) { Write-Host ('iSeries: ' + (($ibm | Select-Object -Expand Name) -join
 else { Aviso 'No se detecto el driver ODBC de IBM i Access (iSeries). Instalelo (licencia IBM) y cree el DSN indicado en ORIGEN_DSN (por defecto Normativo).' }
 
 Paso 'Configuracion'
+$loc = Join-Path $Destino 'config.local.yaml'
+if (-not (Test-Path $loc)) { Copy-Item (Join-Path $Destino 'config.local.yaml.ejemplo') $loc; Write-Host "config.local.yaml creado (ajustes propios del equipo: orden, parametros...; nunca se sobrescribe)" }
+elseif (Test-Path (Join-Path $Destino 'config.yaml.bak_*')) { Aviso 'Si habia cambios propios en el config.yaml anterior (config.yaml.bak_*), pasarlos a config.local.yaml' }
 $envf = Join-Path $Destino '.env'
 if (-not (Test-Path $envf)) {
     (Get-Content (Join-Path $Destino '.env.example')) -replace '^ETL_ENTORNO=.*', 'ETL_ENTORNO=prod' | Set-Content $envf -Encoding ASCII
@@ -109,6 +129,23 @@ Push-Location $Destino
 $rc = $LASTEXITCODE
 Pop-Location
 if ($rc -ne 0) { throw 'La verificacion fallo' }
+
+Paso 'Panel de seguimiento al iniciar Windows'
+if ($SinPanel) { Write-Host 'Omitido (-SinPanel)' }
+elseif (-not (Es-Admin)) { Aviso 'Se requieren permisos de administrador para registrar la tarea de inicio. Ejecute de nuevo como administrador (o use -SinPanel).' }
+else {
+    # Tarea al iniciar el sistema, sin sesion de usuario (SYSTEM), solo escucha en 127.0.0.1 y se reinicia si falla.
+    $accion = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument "/c `"`"$Destino\etl_vigia.cmd`" panel --puerto $PuertoPanel >> `"$Destino\logs\panel.log`" 2>&1`"" -WorkingDirectory $Destino
+    $disparador = New-ScheduledTaskTrigger -AtStartup
+    $ajustes = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
+        -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    Register-ScheduledTask -TaskName $tareaPanel -Action $accion -Trigger $disparador -Settings $ajustes -Principal $principal `
+        -Description 'Panel de seguimiento de etl_vigia_py (solo lectura, 127.0.0.1)' -Force | Out-Null
+    Start-ScheduledTask -TaskName $tareaPanel
+    Write-Host "Tarea $tareaPanel registrada y iniciada: http://127.0.0.1:$PuertoPanel/  (registro: $Destino\logs\panel.log)"
+    Write-Host 'Nota: corre como SYSTEM; si el destino usa autenticacion de Windows, use usuario SQL en .env.'
+}
 
 Write-Host "`nInstalacion completa en $Destino" -ForegroundColor Green
 Write-Host "Siguientes pasos: 1) editar $envf  2) etl_vigia.cmd conexiones  3) etl_vigia.cmd ejecutar --tabla TIPSTRAN --dry-run"

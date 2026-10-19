@@ -1,21 +1,72 @@
 """Log a archivo y registro en VIGIA.ERRORESPROCESO (supuesto: columnas ERROR y DATOSERROR)."""
+import atexit
 import logging
+import logging.handlers
+import os
+import queue
 import re
 from datetime import datetime
 
 from . import dialecto
 
 
+def _sin_seleccion_de_consola():
+    """Desactiva el modo "selección rápida" de la consola de Windows: un clic en la ventana congela la escritura
+    por consola (y con ella la carga) hasta pulsar una tecla. Sin consola o fuera de Windows no hace nada."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.GetStdHandle(-10)                       # STD_INPUT_HANDLE
+        modo = ctypes.c_uint32()
+        if k.GetConsoleMode(h, ctypes.byref(modo)):
+            k.SetConsoleMode(h, (modo.value & ~0x0040) | 0x0080)   # sin QUICK_EDIT, con EXTENDED_FLAGS
+    except Exception:
+        pass
+
+
+def _sin_seleccion_de_consola():
+    """Desactiva el modo "selección rápida" de la consola de Windows: un clic en la ventana congela la escritura
+    por consola (y con ella la carga) hasta pulsar una tecla. Sin consola o fuera de Windows no hace nada."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.GetStdHandle(-10)                       # STD_INPUT_HANDLE
+        modo = ctypes.c_uint32()
+        if k.GetConsoleMode(h, ctypes.byref(modo)):
+            k.SetConsoleMode(h, (modo.value & ~0x0040) | 0x0080)   # sin QUICK_EDIT, con EXTENDED_FLAGS
+    except Exception:
+        pass
+
+
 def crear_logger(cfg, nombre):
+    """Archivo (síncrono) + consola a través de una cola y un hilo propio: si la consola se bloquea (selección con el
+    ratón, ventana suspendida) la carga sigue, porque nunca espera a escribir en pantalla."""
     carpeta = cfg.logs
     carpeta.mkdir(parents=True, exist_ok=True)
     log = logging.getLogger(f"etl.{nombre}.{carpeta}")
     if not log.handlers:
         log.setLevel(logging.INFO)
         fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
-        for h in (logging.FileHandler(carpeta / "etl_vigia.log", encoding="utf-8", delay=True), logging.StreamHandler()):
-            h.setFormatter(fmt)
-            log.addHandler(h)
+        archivo = logging.FileHandler(carpeta / "etl_vigia.log", encoding="utf-8", delay=True)
+        archivo.setFormatter(fmt)
+        log.addHandler(archivo)
+        consola = logging.StreamHandler()
+        consola.setFormatter(fmt)
+        cola = queue.SimpleQueue()
+        oyente = logging.handlers.QueueListener(cola, consola)
+        oyente.start()
+        log.addHandler(logging.handlers.QueueHandler(cola))
+        _sin_seleccion_de_consola()
+
+        def _vaciar():
+            oyente.enqueue_sentinel()                  # termina el hilo tras escribir lo pendiente
+            if oyente._thread:
+                oyente._thread.join(timeout=3)         # si la consola está congelada no se espera más
+        atexit.register(_vaciar)
     return log
 
 

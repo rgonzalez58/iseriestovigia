@@ -95,7 +95,7 @@ def test_registra_fin_con_duracion_iso(correr, consultar):
     fin = consultar("SELECT DATOSERROR FROM VIGIA.ERRORESPROCESO WHERE ERROR='FIN'")
     assert len(fin) == 1 and "estado=OK" in fin[0][0]
     import re
-    assert re.search(r"duracion=PT\d+\.\d{2}M$", fin[0][0])
+    assert re.search(r"duracion=PT\d+\.\d{2}M( |$)", fin[0][0])
 
 
 def test_trozos_repiten_la_corrida(cfg, consultar):

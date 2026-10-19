@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 
-from . import db, dialecto
+from . import db, dialecto, particiones
 
 
 class Aborto(Exception):
@@ -144,6 +144,20 @@ def _diagnosticar_lote(cur, stg, columnas, filas):
         return f"DIAGNOSTICO no disponible ({type(e2).__name__})"
 
 
+def escribir_lote(cfg, cur, tabla, stg, cols_stg, ins, filas):
+    """Escribe un lote al staging. 'parametros' (por defecto): executemany; 'valores': INSERT multi-fila sin
+    parámetros, que reduce los viajes de red cuando el servidor está lejos (se elige con escritura: valores)."""
+    if tabla.escritura == "valores":
+        sqls = dialecto.sqls_insert_valores(cfg, stg, cols_stg, filas)
+        if dialecto.es_sqlserver(cfg):
+            cur.execute("; ".join(sqls))          # un solo viaje de red por lote
+        else:
+            for q in sqls:
+                cur.execute(q)
+    else:
+        cur.executemany(ins, filas)
+
+
 def _contar(conn, sql):
     cur = conn.cursor()
     cur.execute(sql)
@@ -151,9 +165,11 @@ def _contar(conn, sql):
 
 
 def _a_fecha_sqlserver(v):
-    """'AAAAMMDD' sin separadores: se interpreta igual en DATETIME/DATE sea cual sea el idioma de la sesión."""
+    """'AAAA-MM-DD 00:00:00' (formato canónico ODBC). Sirve en las dos rutas del driver: si convierte en el cliente
+    (columna descrita como datetime, p. ej. staging ## o permanente) lo acepta; si lo envía como texto, el servidor
+    lo lee con DATEFORMAT ymd (se fija en cada conexión). 'AAAAMMDD' fallaba en la primera ruta (error 22018)."""
     iso = a_fecha_iso(v)
-    return iso.replace("-", "") if iso else None
+    return iso + " 00:00:00" if iso else None
 
 
 def _transformador(tabla, cols_origen, mapa, fechas_como_date=False):
@@ -200,33 +216,99 @@ def _cerrar(est, ahora=None):
         est["_t"] = None
 
 
-def ejecutar_snapshot(cfg, tabla, origen, destino, log, dry_run=False, forzar=False, est=None):
+def ejecutar_snapshot(cfg, tabla, origen, destino, log, dry_run=False, forzar=False, est=None, fechas=None):
     """Indica en el error la etapa en la que falló (sin datos personales).
     `est` (opcional) recibe las métricas: etapa, ms por etapa y conteos de filas, incluso si falla."""
     est = {} if est is None else est
     est.update(e="inicio", _t=time.monotonic(), ms={})
     try:
-        return _snapshot(cfg, tabla, origen, destino, log, dry_run, forzar, est)
+        return _snapshot(cfg, tabla, origen, destino, log, dry_run, forzar, est, fechas)
     except Aborto:
         raise
     except Exception as e:  # noqa: BLE001
         raise RuntimeError(f"etapa '{est['e']}': {type(e).__name__}: {enmascarar(e, 3000)}" + (f" | {est['diag']}" if est.get("diag") else "")) from e
     finally:
         _cerrar(est)
+        if est.get("stg_compartido"):
+            try:
+                destino.rollback()
+                destino.cursor().execute(f"DROP TABLE {est['stg_compartido']}")
+                destino.commit()
+            except Exception:  # noqa: BLE001
+                pass
 
 
-def _snapshot(cfg, tabla, origen, destino, log, dry_run, forzar, est):
+def _cargar_serie(cfg, tabla, cur_o, cur_d, convertir, stg, cols_stg, ins, log, est):
+    """Un solo hilo: lee, convierte y escribe por lotes (ruta por defecto)."""
+    enviadas = 0
+    t_lect = t_conv = t_ins = 0.0          # segundos acumulados por fase (lectura del origen / conversión / escritura)
+    t_carga = ultimo = time.monotonic()
+    while True:
+        t1 = time.monotonic()
+        lote = cur_o.fetchmany(tabla.lote)
+        t2 = time.monotonic()
+        t_lect += t2 - t1
+        if not lote:
+            break
+        filas = [convertir(f) for f in lote]
+        t3 = time.monotonic()
+        t_conv += t3 - t2
+        try:
+            escribir_lote(cfg, cur_d, tabla, stg, cols_stg, ins, filas)
+        except Exception as e:  # noqa: BLE001
+            est["diag"] = _diagnosticar_lote(cur_d, stg, cols_stg, filas)
+            raise
+        t_ins += time.monotonic() - t3
+        enviadas += len(lote)
+        est["cargadas"] = enviadas
+        if t_ins and time.monotonic() - ultimo >= 30:      # progreso visible en el log aunque la carga sea larga
+            ultimo = time.monotonic()
+            log.info("%s: %d filas en staging | origen %.0f f/s, conversión %.0f f/s, escritura %.0f f/s",
+                     tabla.nombre, enviadas, enviadas / max(t_lect, 1e-9), enviadas / max(t_conv, 1e-9),
+                     enviadas / t_ins)
+    est["fases_s"] = {"lectura_origen": round(t_lect, 1), "conversion": round(t_conv, 1),
+                      "escritura_staging": round(t_ins, 1)}
+    log.info("%s: staging cargado, %d filas en %.1f s (lectura origen %.1f s, conversión %.1f s, escritura %.1f s)",
+             tabla.nombre, enviadas, time.monotonic() - t_carga, t_lect, t_conv, t_ins)
+    return enviadas
+
+
+def _snapshot(cfg, tabla, origen, destino, log, dry_run, forzar, est, fechas=None):
     sql = cfg.sql_origen(tabla)
     _etapa(est, "contar origen")
     # Con contar_origen: false no se ejecuta el SELECT dos veces (útil en tablas enormes); el total es lo leído.
-    total_origen = _contar(origen, f"SELECT COUNT(*) FROM ({sql}) q") if tabla.contar_origen else None
+    # Filtro por fecha: una fecha en la corrida diaria, varias en un reproceso (fecha_defecto o --fecha/--desde/--mes).
+    if fechas and fechas != "todas" and not tabla.particion:
+        log.warning("%s: la tabla no admite filtro de fecha; se carga completa", tabla.nombre)
+    rango = particiones.resolver_rango(tabla, fechas)
+    est["fechas"] = particiones.texto_rango(rango) if tabla.particion else ""
+    partido = tabla.lectores > 1 or rango is not None          # lectura por particiones de fecha y/o por rango
+    filtros = None
+    if partido:
+        if not cfg.tiene_filtro_fecha(tabla):
+            raise Aborto(f"{tabla.nombre}: lectores/fechas requieren @@FILTRO_FECHA@@ en el SQL de origen")
+        _etapa(est, "calcular particiones")
+        filtros = particiones.filtros_para(origen, tabla, rango,
+                                           mod=lambda c, r: dialecto.expr_resto(cfg, c, r))
+        log.info("%s: fechas %s en %d particiones, %d conexiones de lectura", tabla.nombre, particiones.texto_rango(rango),
+                 len(filtros), tabla.lectores)
+        _etapa(est, "contar origen")
+    elif tabla.particion:
+        log.info("%s: todas las fechas", tabla.nombre)
+    total_origen = (_contar(origen, f"SELECT COUNT(*) FROM ({sql}) q")
+                    if tabla.contar_origen and not partido else None)
     est["origen"] = total_origen
     if total_origen is not None:
         log.info("%s: origen=%d filas", tabla.nombre, total_origen)
 
     _etapa(est, "ejecutar SELECT de origen")
     cur_o = origen.cursor()
-    cur_o.execute(sql)
+    if tabla.lectores > 1:
+        cur_o.execute(cfg.sql_origen(tabla, " and 1 = 0"))       # solo para conocer las columnas (sin filas)
+    elif partido:
+        cur_o.execute(cfg.sql_origen(tabla, filtros[0]))
+    else:
+        cur_o.execute(sql)
     cols_origen = [d[0].upper() for d in cur_o.description]
     _etapa(est, "leer estructura destino")
     cols_destino = _columnas(destino, tabla.destino)
@@ -235,12 +317,13 @@ def _snapshot(cfg, tabla, origen, destino, log, dry_run, forzar, est):
     mapa = _validar_columnas(tabla, cols_origen, cols_origen if auto else _columnas(destino, tabla.staging),
                              cols_destino)
     stg = tabla.staging
+    paralelo = tabla.hilos_escritura > 1 or tabla.lectores > 1
     if auto:
-        stg = dialecto.nombre_staging(cfg, tabla.nombre)
+        stg = dialecto.nombre_staging(cfg, tabla.nombre, compartido=paralelo)
         cols_stg = [d for _, d in mapa]
     else:
         cols_stg = [o for o, _ in mapa]
-    # En SQL Server las fechas viajan como 'AAAAMMDD': 'AAAA-MM-DD' en DATETIME depende del idioma/DATEFORMAT
+    # En SQL Server las fechas viajan como 'AAAA-MM-DD 00:00:00' (con DATEFORMAT ymd en la sesión): sin eso depende del idioma
     # de la sesión (con dmy da "fuera de intervalo" cuando el día > 12).
     convertir = _transformador(tabla, cols_origen, mapa, dialecto.es_sqlserver(cfg))
 
@@ -252,9 +335,13 @@ def _snapshot(cfg, tabla, origen, destino, log, dry_run, forzar, est):
     def guardas(total):
         if forzar:
             return
-        if total == 0:
+        if total == 0 and not (rango and tabla.permitir_origen_vacio):
             raise Aborto(f"{tabla.nombre}: el origen devolvió 0 filas (use --forzar para vaciar el destino)")
-        if actuales > 0 and total < actuales * (1 - tabla.max_caida_pct / 100):
+        if total == 0:
+            log.warning("%s: sin filas para %s; el destino queda vacío (permitir_origen_vacio)", tabla.nombre,
+                        particiones.texto_rango(rango))
+        # Con rango de fechas el volumen varía mucho (un día tras un mes de reproceso): no aplica la caída brusca.
+        if rango is None and actuales > 0 and total < actuales * (1 - tabla.max_caida_pct / 100):
             raise Aborto(f"{tabla.nombre}: caída brusca (origen={total}, destino={actuales}, "
                          f"máx {tabla.max_caida_pct}%); use --forzar si es correcto")
 
@@ -267,21 +354,21 @@ def _snapshot(cfg, tabla, origen, destino, log, dry_run, forzar, est):
     db.activar_fast_executemany(cfg, cur_d)
     if auto:
         cur_d.execute(dialecto.sql_crear_staging(cfg, stg, tabla.destino, cols_stg))
+        if paralelo:
+            est["stg_compartido"] = stg          # se borra al terminar (ejecutar_snapshot)
     else:
         cur_d.execute(dialecto.sql_vaciar(cfg, stg, tabla.vaciado))
+    if paralelo:
+        destino.commit()                         # las otras conexiones deben ver la tabla ya creada
     ins = dialecto.sql_insert_staging(cfg, stg, cols_stg)
-    enviadas = 0
-    while True:
-        lote = cur_o.fetchmany(tabla.lote)
-        if not lote:
-            break
-        filas = [convertir(f) for f in lote]
-        try:
-            cur_d.executemany(ins, filas)
-        except Exception as e:  # noqa: BLE001
-            est["diag"] = _diagnosticar_lote(cur_d, stg, cols_stg, filas)
-            raise
-        enviadas += len(lote)
+    if paralelo:
+        from . import carga_paralela
+        enviadas, est["fases_s"] = carga_paralela.cargar(cfg, tabla, cur_o, convertir, stg, cols_stg, ins,
+                                                         max(1, tabla.hilos_escritura), log, est, escribir_lote,
+                                                         _diagnosticar_lote,
+                                                         filtros if tabla.lectores > 1 else None, tabla.lectores)
+    else:
+        enviadas = _cargar_serie(cfg, tabla, cur_o, cur_d, convertir, stg, cols_stg, ins, log, est)
     destino.commit()
     est["cargadas"] = enviadas
 
@@ -310,19 +397,64 @@ def _snapshot(cfg, tabla, origen, destino, log, dry_run, forzar, est):
         return Resultado("DRY-RUN", total_origen, enviadas)
 
     _etapa(est, "transaccion destino")
-    # Única transacción sobre el destino.
+    # Única transacción sobre el destino. Si otra sesión mantiene bloqueada la tabla, se espera como máximo
+    # espera_bloqueo_seg y se falla (el destino conserva la carga anterior) en lugar de quedar colgado.
     try:
         cur = destino.cursor()
+        if dialecto.es_sqlserver(cfg):
+            cur.execute(f"SET LOCK_TIMEOUT {max(1, tabla.espera_bloqueo_seg) * 1000}")
+        fases = est.setdefault("fases_s", {})
+        indices = []
+        if tabla.reconstruir_indices and dialecto.es_sqlserver(cfg):
+            # Se desactivan los índices no agrupados durante la carga y se reconstruyen al final, todo dentro de la
+            # misma transacción (si algo falla, el rollback los deja como estaban).
+            t1 = time.monotonic()
+            cur.execute(dialecto.sql_indices_no_agrupados(cfg), (tabla.destino,))
+            indices = [r[0] for r in cur.fetchall()]
+            for nombre in indices:
+                cur.execute(dialecto.sql_alter_indice(tabla.destino, nombre, "DISABLE"))
+            fases["indices_off"] = round(time.monotonic() - t1, 1)
+            log.info("%s: %d índices desactivados en %.1f s", tabla.nombre, len(indices), fases["indices_off"])
+        t1 = time.monotonic()
         cur.execute(dialecto.sql_vaciar(cfg, tabla.destino, tabla.vaciado))
+        fases["vaciar"] = round(time.monotonic() - t1, 1)
+        log.info("%s: destino vaciado en %.1f s", tabla.nombre, fases["vaciar"])
+        t1 = time.monotonic()
         cur.execute(dialecto.sql_insert_select(cfg, tabla.destino, stg,
-                                               [d for _, d in mapa], cols_stg))
+                                               [d for _, d in mapa], cols_stg, tabla.tablock))
+        insertadas = cur.rowcount
+        fases["insertar"] = round(time.monotonic() - t1, 1)
+        log.info("%s: insertado desde staging en %.1f s (filas insertadas según el servidor: %s)", tabla.nombre,
+                 fases["insertar"], insertadas)
+        if indices:
+            t1 = time.monotonic()
+            for nombre in indices:
+                cur.execute(dialecto.sql_alter_indice(tabla.destino, nombre, "REBUILD"))
+            fases["indices_rebuild"] = round(time.monotonic() - t1, 1)
+            log.info("%s: %d índices reconstruidos en %.1f s", tabla.nombre, len(indices), fases["indices_rebuild"])
+        t1 = time.monotonic()
         final = _contar(destino, f"SELECT COUNT(*) FROM {tabla.destino}")
+        fases["contar"] = round(time.monotonic() - t1, 1)
+        log.info("%s: conteo del destino en %.1f s", tabla.nombre, fases["contar"])
         if final != enviadas:
             raise Aborto(f"{tabla.nombre}: destino={final} distinto de staging={enviadas}")
+        t1 = time.monotonic()
         destino.commit()
-    except BaseException:
+        fases["commit"] = round(time.monotonic() - t1, 1)
+        log.info("%s: commit en %.1f s", tabla.nombre, fases["commit"])
+    except BaseException as e:
         destino.rollback()
+        if "1222" in str(e):
+            raise RuntimeError(f"tiempo de espera de bloqueo agotado ({tabla.espera_bloqueo_seg} s): otra sesión "
+                               f"mantiene bloqueada {tabla.destino}; el destino conserva la carga anterior. Ver "
+                               f"blocking_session_id (manual, 'Carga lenta')") from e
         raise
+    finally:
+        if dialecto.es_sqlserver(cfg):
+            try:
+                destino.cursor().execute("SET LOCK_TIMEOUT -1")
+            except Exception:  # noqa: BLE001
+                pass
     est["cargadas"] = final
     log.info("%s: cargadas %d filas", tabla.nombre, final)
     return Resultado("OK", total_origen, final)

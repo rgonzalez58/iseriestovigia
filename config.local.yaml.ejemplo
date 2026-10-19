@@ -1,0 +1,20 @@
+# Ajustes propios de ESTE equipo. Copiar a config.local.yaml (el instalador lo crea si no existe y NUNCA lo
+# sobrescribe). Se mezcla sobre config.yaml: los mapas se combinan clave por clave; las listas (p. ej. orden) se
+# reemplazan completas. Descomentar solo lo que se necesite cambiar.
+#
+# orden: [TIPSTRAN, TERCEROS, DATOSADICIONALES, PRODUCTOS, TRANSACCIONES]   # orden de 'todas'
+#
+# defaults:
+#   limpiar_al_final: false      # true: vacía las tablas destino al terminar bien el proceso
+#   lote: 5000
+#
+# parametros:
+#   PROD_A: "31,71,114"          # grupos de productos (solo enteros separados por coma)
+#
+# tablas:
+#   TRANSACCIONES:
+#     lote: 20000
+#     lectores: 4                # conexiones de lectura al iSeries por particiones de fecha (1-16)
+#     fecha_defecto: ayer        # ayer | hoy | ninguna (toda la tabla; valor de config.yaml); por línea de comandos: --fecha/--desde/--hasta/--mes
+#     hilos_escritura: 4         # conexiones escritoras en paralelo (1-16); medir antes con 'medir --hilos'
+#     texto_max: {PRODUCTO_NUMERO: 20, INTERMEDIARIO_CODIGO: 30}

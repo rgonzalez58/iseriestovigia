@@ -12,3 +12,4 @@ installer/dist/
 UpgradeLog.htm
 *.zip
 *.bak_*
+config.local.yaml

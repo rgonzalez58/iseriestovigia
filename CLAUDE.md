@@ -13,27 +13,15 @@ Copiar este archivo a la raíz del proyecto (puede renombrarse a `CLAUDE.md` o `
 
 ## 2. Estado actual
 
-Implementada la tabla **TERCEROS** (`VIGIA.TMP_TERCEROS`), carga tipo *snapshot* (recarga completa e idempotente). `python -m pytest` pasa **18 pruebas**.
+Ver `PLAN_DESARROLLO.md` (estado, resultados medidos y pendientes) y `MANUAL_INSTALACION_Y_EJECUCION.md`. Resumen: las 5 tablas
+(TERCEROS, DATOSADICIONALES, PRODUCTOS, TIPSTRAN, TRANSACCIONES) estan implementadas y probadas (`python -m pytest`, 94 pruebas en SQLite)
+y validadas en el equipo B; TRANSACCIONES lee toda la tabla de origen salvo que se indique fecha (`--fecha/--desde/--hasta/--mes`) con lectura y escritura en paralelo.
 
-```
-main.py                    CLI: listar | conexiones | describir | ejecutar [--destino] [--dry-run] [--forzar]
-config.yaml                tablas + defaults (credenciales NO van aquí: van en .env)
-etl/config.py              carga config.yaml + .env; dataclasses Tabla y Config; cadenas ODBC
-etl/db.py                  conectar_origen / conectar_destino (pyodbc en prod, SQLite en dev)
-etl/dialecto.py            diferencias SQL Server vs SQLite (TRUNCATE, TABLOCK, columnas, GETDATE)
-etl/snapshot.py            lógica de carga snapshot (ver sección 3)
-etl/runner.py              lock + conexiones + snapshot + log; devuelve código de salida
-etl/logger.py              logging a archivo y registro en VIGIA.ERRORESPROCESO
-etl/lock.py                lock por archivo (sin os.kill: en Windows termina el proceso)
-etl/diagnostico.py         comandos conexiones y describir
-sql/origen/terceros.sql    SELECT de origen, copiado tal cual del SSIS
-sql/destino/               DDL: tmp_terceros.sql (existente), stg_terceros.sql (staging, 39 columnas)
-sql/paridad/terceros.sql   comparación EXCEPT entre TMP del SSIS y TMP_*_PY de Python
-dev/seed_dev.py            genera dev_data/ (iSeries y SQL Server simulados, con casos borde)
-tests/                     test_terceros.py (integración sobre SQLite) y test_unidades.py
-```
+Modulos: `main.py` (CLI), `etl/config.py` (config.yaml + config.local.yaml + .env), `etl/snapshot.py` (carga), `etl/carga_paralela.py`
+(lectores/escritores), `etl/particiones.py` (filtros por fecha), `etl/runner.py` (lock, conexiones, registro, `todas`), `etl/logger.py`,
+`etl/dialecto.py`, `etl/db.py`, `etl/diagnostico.py` (`conexiones`, `describir`, `medir`, `comparar`), `etl/panel.py` + `panel.html`.
 
-Códigos de salida (los lee el Programador de tareas): `0` OK, `1` error, `2` ya en ejecución, `3` abortado por validación (el destino no se modificó).
+Codigos de salida: `0` OK, `1` error, `2` ya en ejecucion, `3` abortado por validacion/configuracion (el destino no se modifico).
 
 ## 3. Cómo funciona un *snapshot* (`etl/snapshot.py`)
 
@@ -58,41 +46,22 @@ Mapeo actual: **por nombre**. El alias de cada columna del SELECT debe ser igual
 - **Todo cambio lleva su prueba** en `tests/` y debe dejar `python -m pytest` en verde. Cada tabla nueva amplía `dev/seed_dev.py` con datos falsos y casos borde.
 - SQLite **no** reproduce el comportamiento de `CHAR` de DB2 (`''` = `'   '`) ni los tipos reales del driver ODBC; no afirmar que algo está validado contra producción si solo pasó en SQLite.
 
-## 5. Tareas pendientes (en este orden)
+## 5. Tareas pendientes
 
-### T1. Columnas que no se migran y nombres distintos (`ignorar` y `mapeo`)
-Agregar a cada tabla en `config.yaml` (y a la dataclass `Tabla`):
-- `ignorar: [COL1, COL2]`: columnas del SELECT que **no** se migran. No se cargan a staging ni al destino (se descartan al leer cada fila). Staging no necesita tenerlas.
-- `mapeo: {ALIAS_ORIGEN: COLUMNA_DESTINO}`: el alias del origen se carga en staging con su propio nombre y el `INSERT ... SELECT` final lo escribe en `COLUMNA_DESTINO`.
+Ver `PLAN_DESARROLLO.md` ("Pendiente"). Las tareas T1-T6 originales estan hechas; quedan T7 (alertas), la decision de T1 y lo medible en el
+equipo B (TERCEROS real, indice por fecha en el origen, opciones del driver ODBC, paridad con el SSIS).
 
-Criterios de aceptación:
-- Validar en `_validar_columnas` que toda entrada de `ignorar`/`mapeo` exista en el SELECT, y que los destinos de `mapeo` existan en la tabla destino.
-- Una columna del origen que no esté en `ignorar`, ni exista en el destino (directo o por `mapeo`) **sigue abortando** con mensaje claro. *Decisión abierta con el usuario:* mantener el aborto (valor por defecto) o permitir "ignorar con aviso"; no cambiar el comportamiento sin confirmarlo.
-- `fechas`, `a_texto` y `clave` siguen refiriéndose a alias del origen.
-- Pruebas nuevas: columna ignorada no llega al destino; columna renombrada llega con el nombre del destino; error al mencionar columnas inexistentes.
-
-### T2. Siguiente tabla: `TMP_TIPSTRAN` (la más simple)
-Pendiente de que el usuario entregue el **SQL de origen** y el **`CREATE TABLE` del destino**. Origen conocido: `GNBWEB_DB.psa068 where psa068st='A'`. Seguir el procedimiento del `README.md` ("Agregar otra tabla"): SQL en `sql/origen/`, DDL de staging en `sql/destino/`, entrada en `config.yaml`, datos falsos en `dev/seed_dev.py`, pruebas, y archivo de paridad en `sql/paridad/`.
-
-### T3. `TMP_DATOSADICIONALESTERCERO`
-`UNION` de `gnbweb_db.psa065` + `psa002` (flag `LISTAS_RESTRICTIVAS` 1/0). Snapshot. El SSIS tiene un `Truncate_TMP_PT` deshabilitado sobre esta tabla; la nueva carga es idempotente por diseño.
-
-### T4. `TMP_PRODUCTOSTERCERO`
-`gnbweb_db.psa066` en 3 ramas `UNION` por `psa066mo`, con listas de productos parametrizables (`Productos_GrupoA/B` en el SSIS, sustituyendo `@@PROD_A@@` y `@@PROD_B@@`). Implementar sustitución de parámetros en el SQL de origen desde `config.yaml` o `.env`, sin editar el archivo SQL.
-
-### T5. `TMP_TRANSACCIONES` (crítica, 10M+ filas): nuevo modo `incremental`
-`gnbweb_db.psa067`, 3 ramas `UNION` por `psa067mo`, con `Data Conversion` y conteo en `User::CantidadRegistros`. Diseño propuesto:
-- Lectura particionada por fecha (rangos mensuales) y hasta N hilos en paralelo (parámetro, por defecto 3 o 4, para no saturar el iSeries).
-- Por partición: vaciar su rango en staging, cargar, validar conteo, y `DELETE` del rango + `INSERT` en el destino dentro de una transacción.
-- Tabla de control `VIGIA.ETL_CONTROL` (watermark y estado por partición) para reanudar solo lo fallido. Reintentos por partición.
-- Antes de implementar, necesita del usuario: volumen, columna de fecha o ID creciente, y si hay bajas o actualizaciones en el origen.
-- Valorar escritura con `bcp` o `mssql-python` (bulk copy) si `fast_executemany` no alcanza al medir en el equipo B.
-
-### T6. Orquestador `todas`
-Comando que ejecute todas las tablas respetando dependencias (equivalente a `MASTER_ETL`: TERCEROS → DATOSADICIONALES → PRODUCTOS → TIPSTRAN → TRANSACCIONES), con resumen final y código de salida.
-
-### T7. Operación
-Alertas (correo o Teams) cuando el código de salida sea distinto de 0; documentar el agendado con Task Scheduler/PM2 (ya hay un ejemplo en `README.md`).
+## Directrices acordadas (usuario)
+- **Regla de datos:** en cada corrida `TMP_*` contiene solo lo de esa corrida (se reemplaza todo el contenido). Proceso diario; TRANSACCIONES
+  sin parametros se lee TODA la tabla de origen (se asume que solo contiene lo que hay que transmitir); con `--fecha/--desde/--hasta/--mes` se acota (`fecha_defecto: ayer|hoy` opcional en config.local.yaml).
+- `limpiar_al_final` (vaciar TMP al terminar bien) existe pero esta apagado; vaciado por defecto `truncate` (confirmado por el usuario).
+- Ajustes propios de cada equipo van en `config.local.yaml` (nunca se sobrescribe); `config.yaml` es de la version.
+- Registro en `VIGIA.ERRORESPROCESO` (PROCESO = NOMBRE de `PROCESOS`, TAREA, FECADI=GETDATE(), USUADI=SYSTEM_USER; mensajes largos en
+  varios registros de 500) y `VIGIA.PROCESOS`; inicio y fin con tiempo ISO por tabla y global.
+- Optimizar de forma **medida**: usar `medir`, `comparar` y el desglose de fases del log antes de cambiar algo; no afirmar mejoras sin dato.
+- Si una solicitud afecta el rendimiento o la eficiencia, avisar y dar alternativas.
+- Copiar lo desarrollado y probado a `C:\Users\usuario\OneDrive\ETL` (el equipo B ejecuta desde ahi) y regenerar el instalador
+  (`installer/build_ps1.ps1`, que siempre reconstruye el payload); no incluir bases de datos ni `.env`.
 
 ## 6. Cómo probar
 
@@ -106,13 +75,12 @@ python main.py describir --tabla TERCEROS
 
 Los fixtures de `tests/conftest.py` crean un `dev_data` temporal por prueba; usarlos para toda prueba nueva (`cfg`, `correr`, `consultar`, `origen_rw`).
 
-## 7. Pendiente de validar en el equipo B (no se puede aquí)
+## 7. Validado y pendiente en el equipo B
 
-- **Paridad contra el SSIS** (`sql/paridad/terceros.sql`): `EXCEPT` en ambos sentidos sin filas y conteos iguales.
-- Comparaciones `''` vs `'   '` en DB2 (`CHAR` con relleno).
-- Tipos reales que devuelve el driver ODBC (fechas numéricas `AAAAMMDD`, `Decimal`); `describir` los lista y detecta tipos mezclados (p. ej. `SUCURSAL_CODIGO`, que se convierte a texto con `a_texto`).
-- Codificación (`origen.encoding: cp1252`), permisos (`TRUNCATE`/`ALTER`, si no: `vaciado: delete`), `TABLOCK`, `fast_executemany` y rendimiento real.
-- **Supuesto del log:** `VIGIA.ERRORESPROCESO` recibe `ERROR` ← estado (`INICIO`, `OK`, `ERROR`, `ABORTADO`) y `DATOSERROR` ← mensaje. Confirmar contra el DDL real.
+Validado: conexion al iSeries (DSN o `ORIGEN_DRIVER`/`ORIGEN_SISTEMA`), cargas de las tablas, fechas (`DATEFORMAT ymd` en la sesion y formato
+`AAAA-MM-DD 00:00:00`), `fast_executemany`, escritura/lectura en paralelo, registro en `ERRORESPROCESO`/`PROCESOS`. Pendiente: ver
+`PLAN_DESARROLLO.md`. SQLite no reproduce `CHAR` de DB2 ni los tipos reales del driver: no afirmar que algo esta validado contra produccion si
+solo paso en SQLite.
 
 ## 8. Datos que faltan del usuario
 

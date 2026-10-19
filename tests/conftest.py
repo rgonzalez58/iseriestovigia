@@ -16,6 +16,8 @@ from etl import config, runner  # noqa: E402
 def cfg(tmp_path):
     seed_dev.crear(tmp_path / "dev_data", filas=100)
     c = config.cargar(raiz=RAIZ, dev_dir=tmp_path / "dev_data", entorno="dev")
+    for t in c.tablas.values():
+        t.fecha_defecto = ""          # las pruebas de fecha por defecto la fijan ellas
     return c
 
 

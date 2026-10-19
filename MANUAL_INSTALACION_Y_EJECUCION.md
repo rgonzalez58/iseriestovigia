@@ -12,7 +12,7 @@ Proceso que migra tablas desde **iSeries/DB2** (ODBC) hacia **SQL Server** (base
 | `TIPSTRAN` | `VIGIA.TMP_TIPSTRAN` | `GNBWEB_DB.psa068` (estado `A`) |
 | `TRANSACCIONES` | `VIGIA.TMP_TRANSACCIONES` | `gnbweb_db.psa067` (3 ramas por producto; script PSA003) |
 
-Orden de `todas`: TERCEROS → DATOSADICIONALES → PRODUCTOS → TIPSTRAN → TRANSACCIONES.
+Orden de `todas`: TIPSTRAN → TERCEROS → DATOSADICIONALES → PRODUCTOS → TRANSACCIONES.
 
 `TRANSACCIONES` (tabla grande) es una carga completa (*snapshot*) como las demás, con tres particularidades en `config.yaml`: `contar_origen: false` (no ejecuta el SELECT dos veces; el total es lo leído), conversión a texto de `PRODUCTO_NUMERO` (máx. 20) e `INTERMEDIARIO_CODIGO` (máx. 30) — si algún valor excede el máximo la carga **aborta** (código 3, destino sin cambios) en lugar de truncar — y sin revisión de claves duplicadas. Para volúmenes muy altos está pendiente el modo incremental (ver `PLAN_DESARROLLO.md`).
 
@@ -87,7 +87,12 @@ Deben existir antes de la primera carga:
 - No hay que crear tablas de staging: el origen es un script SELECT cuyas columnas llevan el mismo nombre que las del destino (pueden ser menos; las demás quedan en NULL) y la carga intermedia usa una tabla temporal `#STG_*` con la estructura del destino. Para una tabla fija: `staging: VIGIA.STG_X` en `config.yaml`.
 - `VIGIA.ERRORESPROCESO` con las columnas `PROCESO`, `TAREA`, `ERROR`, `DATOSERROR`, `FECADI`, `USUADI` (registro del proceso: PROCESO=`ETL_VIGIA_PY`, TAREA=tabla destino en ejecución, ERROR=estado, DATOSERROR=mensaje, FECADI=`GETDATE()`, USUADI=`SYSTEM_USER`; si no existe, la carga continúa y solo avisa en el log).
 
-### 4.3 `config.yaml`
+### 4.3 `config.yaml` y `config.local.yaml`
+- **`config.yaml`** es de la versión: el instalador lo reemplaza en cada actualización (el anterior queda en `config.yaml.bak_<fecha>`). **No lo edite.**
+- **`config.local.yaml`** son los ajustes propios del equipo (orden de `todas`, `parametros`, `limpiar_al_final`, `lote`, opciones de una tabla…). El instalador lo crea desde `config.local.yaml.ejemplo` si no existe y **nunca lo sobrescribe**. Se mezcla sobre `config.yaml`: los mapas se combinan clave por clave y las listas (como `orden`) se reemplazan completas. Ejemplo: `orden: [TIPSTRAN, TERCEROS, TRANSACCIONES]`.
+- Una opción o sección mal escrita (p. ej. `limpiar_al_fin`) o un `orden` con una tabla inexistente se rechaza al arrancar con un mensaje claro, en lugar de ignorarse en silencio. `etl_vigia.cmd listar` valida la configuración y muestra el orden efectivo.
+
+Opciones por tabla (además de las de abajo, `escritura: parametros | valores`, que elige cómo se escribe el staging; ver "Carga lenta"):
 Opciones por tabla: `clave`, `fechas`, `a_texto`, `ignorar` (columnas que no se migran), `mapeo` (alias del origen → columna destino distinta), `lote`, `tolerancia_filas`, `max_caida_pct`, `vaciado` (`truncate` o `delete`; use `delete` si el usuario no tiene permiso `TRUNCATE`). Detalle en `README.md`.
 
 ## 5. Verificación antes de usar
@@ -169,6 +174,16 @@ La cuenta del servicio necesita leer `.env` y escribir en `logs\`, y el DSN `Nor
 - `VIGIA.PROCESOS` (`NOMBRE`, `FECHA` en ISO 8601 como texto, `RESULTADO`): registro de ejecución. Una fila `INICIO` y otra `FIN` por tabla (`NOMBRE = ETL_VIGIA_PY.<TABLA>`) y por el proceso masivo `todas` (`ETL_VIGIA_PY.TODAS`, con estado, tablas OK y duración de cada tabla). Todas comparten el identificador `corrida=AAAAMMDD_HHMMSS`, también presente en `ERRORESPROCESO`, donde `PROCESO` = `NOMBRE` de `PROCESOS` (p. ej. `ETL_VIGIA_PY.TERCEROS`; el global es `ETL_VIGIA_PY.TODAS`). Unión: `SELECT * FROM VIGIA.PROCESOS p JOIN VIGIA.ERRORESPROCESO e ON e.PROCESO = p.NOMBRE AND e.DATOSERROR LIKE '%corrida=' + SUBSTRING(p.RESULTADO, CHARINDEX('corrida=', p.RESULTADO) + 8, 15) + '%'`. La tabla debe existir antes de ejecutar (si falta, la carga continúa y solo avisa en el log).
 - Bloqueo: `logs\<TABLA>.lock` impide ejecuciones simultáneas de la misma tabla; se elimina solo al terminar (o a las 12 horas si quedó huérfano).
 
+### Promoción TMP → definitiva: `promover`
+Después de cargar `TMP_TRANSACCIONES` (`ejecutar --tabla TRANSACCIONES` o `todas`):
+
+```
+.\etl_vigia.cmd promover --tabla TRANSACCIONES --dry-run     (primero: solo valida y cuenta)
+.\etl_vigia.cmd promover --tabla TRANSACCIONES
+```
+Reemplaza al procedimiento `VIGIA.PR_CARGATRANSACCIONES` (no lo modifica). Valida con las funciones `VIGIA.VAL*` existentes, inserta en `VIGIA.TRANSACCIONES` por lotes, genera las alertas por listas restrictivas, registra los rechazados en `ERRORESPROCESO` (`PROCESO='Carga Datos Base'`, `TAREA='Carga Transacciones'`) y borra de `TMP_TRANSACCIONES` lo promovido. Es idempotente: repetirlo no duplica. Opciones (`promociones:` en `config.yaml` o `config.local.yaml`): `lote`, `alertas`, `borrar_promovidas`. Necesita permiso de `INSERT` en `TRANSACCIONES` y `RESULTADOALERTASPROGRAMADAS` y `EXECUTE` sobre `PR_GENMAIL` y las funciones `VAL*`.
+Consulta de resultado: `SELECT * FROM VIGIA.uPROCESOS WHERE PROCESO = 'ETL_VIGIA_PY.PROMO_TRANSACCIONES' ORDER BY ID DESC;` (el `MENSAJE` trae pendientes, insertadas, rechazadas, alertas y tiempo por etapa).
+
 ### Métricas exactas: VIGIA.uPROCESOS
 `VIGIA.PROCESOS` no alcanza para medir con exactitud: guarda un texto por evento (`FECHA` varchar sin milisegundos y `RESULTADO` libre), sin duración numérica, sin filas ni tiempos por etapa, y el inicio y el fin son filas separadas que hay que emparejar leyendo texto. Por eso se agregó **`VIGIA.uPROCESOS`** (script `sql\destino\uprocesos.sql`, ejecutar una vez en la base `vigia`). `PROCESOS` sigue escribiéndose igual; no se modifica.
 
@@ -196,6 +211,95 @@ etl_vigia.cmd panel --puerto 9000 --max 500
 
 Es un proceso aparte, de solo lectura (`SELECT` con `READ UNCOMMITTED`, sin bloqueos), que no comparte nada con la carga. Consulta la base cada 10 s como máximo mientras haya una pestaña abierta y guarda el resultado 5 s en caché (incluye la sección «Tiempos exactos» de uPROCESOS si existe), así que varias pestañas no multiplican las consultas. Solo escucha en `127.0.0.1`; use `--host 0.0.0.0` únicamente en una red de confianza (no tiene autenticación; muestra nombres de tabla, estados y mensajes sin datos personales). Para detenerlo: Ctrl+C.
 
+### Escritura en paralelo (`hilos_escritura`)
+Con `hilos_escritura: N` (1 a 16; por defecto 1 = como siempre) la carga al staging usa N conexiones a SQL Server que escriben a la vez, mientras el hilo principal lee el origen: se aprovecha que cada lote espera la respuesta del servidor (latencia). El staging pasa a ser una tabla temporal **global** (`##STG_<TABLA>`, en `tempdb`), que se borra sola al terminar. La transacción final de `TMP_*` no cambia (un solo `commit`), y ante cualquier error el destino conserva la carga anterior.
+
+```yaml
+# config.local.yaml
+tablas:
+  TRANSACCIONES:
+    hilos_escritura: 4
+```
+Primero medir con `etl_vigia.cmd medir --tabla TERCEROS --hilos 8` (cuánto escala la escritura) y subir de a poco: 4, 8. La lectura del iSeries sigue siendo de una sola conexión (~5.500 filas/s), que pasa a ser el límite. El log muestra cada 30 s filas leídas, escritas y el estado de la cola (`cola 8/8` = los escritores no alcanzan; `cola 0/8` = el límite es la lectura). Con 11 millones de filas el staging y la inserción final necesitan varios GB libres en `tempdb` y en el log de `vigia`.
+
+### Fechas de la corrida y lectura en paralelo (`TRANSACCIONES`)
+Si **no se indica ninguna fecha** (por ejemplo, `todas` a secas), se lee **toda la tabla de origen**: se asume que `psa067` contiene solo los registros que hay que transmitir. Para acotar (reproceso de un día, un mes, etc.) se usan las opciones de fecha. El filtro se aplica sobre `psa067fc` (columna `FECHA`) directamente en el iSeries.
+
+```bat
+etl_vigia.cmd todas                                              (sin fecha: toda la tabla de origen)
+etl_vigia.cmd ejecutar --tabla TRANSACCIONES --fecha 2026-10-15   (una fecha concreta)
+etl_vigia.cmd ejecutar --tabla TRANSACCIONES --mes 2026-09         (reproceso: mes completo)
+etl_vigia.cmd ejecutar --tabla TRANSACCIONES --desde 2026-09-01 --hasta 2026-09-15
+etl_vigia.cmd ejecutar --tabla TRANSACCIONES --todas-las-fechas    (toda la tabla de origen)
+```
+- Las opciones de fecha solo afectan a las tablas con `particion` en `config.yaml` (hoy `TRANSACCIONES`); en `todas` las demás tablas se cargan completas como siempre. `fecha_defecto` es `ninguna` (toda la tabla) en `config.yaml`; si algún equipo quiere que por defecto cargue solo ayer u hoy, pone `ayer` u `hoy` en `config.local.yaml`.
+- Sigue valiendo la regla de que la tabla destino contiene solo lo de la corrida: cada carga **reemplaza** el contenido de `TMP_TRANSACCIONES` por las fechas pedidas.
+- Con rango de fechas no se aplica la guarda de "caída brusca" (un día después de un mes de reproceso tiene muchas menos filas). `permitir_origen_vacio: true` (valor de `config.yaml` para `TRANSACCIONES`) permite que un día sin transacciones deje la tabla vacía en lugar de abortar; con `false` aborta (código 3, destino sin cambios) y `--forzar` lo permite una vez.
+- El `FIN` de cada tabla y el log indican las fechas cargadas (`fechas=2026-10-15`).
+
+**Lectura paralela.** `lectores: R` conexiones al iSeries leen a la vez: con rango, una partición por **día** (un mes = 31 particiones repartidas entre los lectores); sin rango (toda la tabla), una por mes más las de fechas anteriores, posteriores y nulas, de modo que ninguna fila queda fuera. Se combina con `hilos_escritura: N` (ver arriba):
+
+```yaml
+# config.local.yaml
+tablas:
+  TRANSACCIONES:
+    lectores: 4
+    hilos_escritura: 8
+```
+- **Una sola fecha con varios lectores:** con pocas fechas (menos de 2 × `lectores`, p. ej. la corrida diaria) cada fecha se reparte además en `lectores` trozos por el resto de `psa067co` (`subcolumna` en `particion`), más un trozo con lo que ningún resto cubre (nulos, fracciones, negativos), de modo que ninguna fila queda fuera. Es lo que permite leer en paralelo un solo día. Medición (fecha con 829.830 filas): el iSeries resuelve la consulta en 2 a 4 s (`COUNT`); lo que tarda (65 a 118 s con una conexión) es traer las filas por ODBC, y eso sí escala con más conexiones.
+- El SQL de origen lleva el marcador `@@FILTRO_FECHA@@` en el `WHERE` de cada rama; vacío no cambia nada. Las filas repetidas tienen la misma fecha, así que el `UNION` conserva su resultado.
+- Con rango o lectores no se hace el `COUNT(*)` previo del origen; el total es lo leído.
+- Se crean hasta 16 conexiones al iSeries y 16 a SQL Server: subir de a poco (2 y 4, luego 4 y 8). El log informa cada 30 s las filas leídas y escritas, las particiones hechas y el estado de la cola.
+
+### Índices del origen y velocidad de la lectura de `TRANSACCIONES`
+Índices de `GNBWEB_DB.PSA067` (consulta de `QSYS2.SYSINDEXES`/`SYSKEYS`): `PSA06701` = `PA, TD, DO, MC, NC, SO, TX, FC, CO` y `PSA06702` = `CI`. **Ninguno empieza por la fecha (`PSA067FC`)**, así que un filtro por fecha obliga al iSeries a recorrer la tabla (o el índice) completa: una consulta por fecha cuesta un recorrido, y cada partición paralela cuesta otro.
+
+Consecuencias y recomendaciones:
+- **Corrida diaria (una fecha):** un solo recorrido. Conviene que sea **uno** y no tres: el script actual tiene tres ramas con `UNION`; `sql/origen/transacciones_optimizado.sql` hace lo mismo en una sola lectura. Antes de adoptarlo, compararlo sobre una fecha real (solo lectura, no imprime datos):
+  ```bat
+  etl_vigia.cmd comparar --tabla TRANSACCIONES --sql sql/origen/transacciones_optimizado.sql --fecha 2026-10-15
+  ```
+  Muestra filas de cada script, filas que solo están en uno u otro, y el tiempo de cada consulta; debe decir `IGUALES`. Si el alterno es igual y más rápido, se activa con `sql: sql/origen/transacciones_optimizado.sql` en `tablas: TRANSACCIONES:` de `config.local.yaml`.
+- **Reproceso de un mes:** con `lectores: 1` (valor por defecto) es una sola consulta para todo el rango, es decir, un recorrido. **No** subir `lectores` mientras no exista un índice por fecha: cada día sería otro recorrido completo.
+- **Mejora de fondo (la decide el administrador del iSeries):** un índice cuya primera columna sea la fecha, p. ej. `CREATE INDEX GNBWEB_DB.PSA06703 ON GNBWEB_DB.PSA067 (PSA067FC)`. Con él, una fecha se resuelve en segundos y las particiones diarias en paralelo pasan a ser útiles. El ETL no crea índices (el origen es de solo lectura); el costo es el mantenimiento del índice en la tabla productiva.
+- Para medir cuánto tarda la primera fila de cada partición: `etl_vigia.cmd medir --tabla TRANSACCIONES --lectores 4`.
+
+### Velocidad de la lectura por ODBC (iSeries)
+La lectura de filas por una conexión ronda 5.000 a 15.000 filas/s según el día. Además de `lectores`, el driver de IBM i Access tiene opciones de rendimiento (bloques de registros más grandes, compresión, optimizar para todas las filas) que se pueden probar con `ORIGEN_OPCIONES` en el `.env`, separadas por `;`. **Los nombres exactos de las palabras clave dependen de la versión del driver**: confírmelos en la pestaña de rendimiento de la configuración del DSN o en la documentación de IBM antes de usarlos, y mida con `etl_vigia.cmd medir --tabla TRANSACCIONES` (línea `origen: ... lectura`) antes y después.
+
+### Índices del destino en la carga final (`reconstruir_indices`)
+El `INSERT … SELECT` final actualiza los índices no agrupados fila por fila (en `TMP_TRANSACCIONES` hay 2; con 830 mil filas tarda 38 a 58 s). Con `reconstruir_indices: true` se **desactivan** antes de insertar y se **reconstruyen** al terminar, dentro de la misma transacción (si algo falla, el rollback los deja como estaban). El log informa `indices_off`, `insertar` e `indices_rebuild`, y el `FIN` los incluye en `fases=`. Requiere permiso `ALTER` sobre la tabla (el mismo que `TRUNCATE`). Apagado por defecto: medir las dos formas y quedarse con la más rápida (suma de `indices_off` + `insertar` + `indices_rebuild` frente a `insertar`).
+```yaml
+tablas:
+  TRANSACCIONES:
+    reconstruir_indices: true
+```
+
+### Fase final lenta (vaciar, insertar, contar, commit)
+El log y el `FIN` (`fases=`) desglosan la transacción final: `vaciar`, `insertar` (con las filas que el servidor dice haber insertado), `contar` y `commit`, en segundos. Si una tarda mucho, mientras ocurre ejecute en SQL Server la consulta de bloqueos de "Carga lenta" (el `wait_type` indica la causa: `WRITELOG` o `LOGBUFFER` = escritura del log, `PAGEIOLATCH_*`/`IO_COMPLETION` = disco, `LCK_*` = bloqueo) y revise el modelo de recuperación y el crecimiento de los archivos:
+```sql
+SELECT d.name, d.recovery_model_desc, f.name AS archivo, f.type_desc, f.size * 8 / 1024 AS mb, f.growth, f.is_percent_growth
+FROM sys.databases d JOIN sys.master_files f ON f.database_id = d.database_id
+WHERE d.name IN ('vigia', 'tempdb') ORDER BY d.name, f.type;
+```
+Con el modelo `SIMPLE` y `WITH (TABLOCK)` el `INSERT` se registra de forma mínima y SQL Server vuelca todas las páginas nuevas al disco en el `commit`: con millones de filas y disco lento el `commit` puede tardar minutos. Para comparar sin ese hint: `tablas: {TRANSACCIONES: {tablock: false}}` en `config.local.yaml` (se escribe más log, pero el `commit` no fuerza el volcado). Probar ambos y quedarse con el más rápido. Un log pequeño con crecimiento en pasos chicos (1 MB o 10 %) obliga a crecer muchas veces durante una transacción grande, y cada crecimiento espera.
+
+### Bloqueos en la carga final (`espera_bloqueo_seg`)
+La transacción final (vaciar `TMP_*` e insertar desde el staging) espera como máximo `espera_bloqueo_seg` segundos (por defecto 120) a que otra sesión suelte la tabla. Si se agota, la carga **falla con un mensaje claro** (`tiempo de espera de bloqueo agotado ... otra sesión mantiene bloqueada VIGIA.TMP_X`), el destino conserva la carga anterior y no queda colgada. Ajustable en `config.local.yaml` (`defaults` o por tabla). El log registra cuánto tarda el vaciado y el `INSERT` final.
+
+### Carga lenta: cómo medir dónde se va el tiempo
+```bat
+etl_vigia.cmd medir --tabla TERCEROS --filas 20000
+```
+Lee una muestra del origen y la escribe en una tabla temporal (no toca las tablas reales ni imprime datos). Informa filas/s de **lectura del origen**, **conversión en Python** y **escritura** (con y sin `fast_executemany`), y cuántos índices y triggers tiene el destino. Compara también la escritura con `INSERT` multi-fila sin parámetros (`escritura: valores`), que manda miles de filas por viaje de red y conviene cuando el servidor de SQL Server está lejos (latencia alta). En una medición real con el servidor a 7 ms de latencia fue más lenta que `fast_executemany` (299 frente a 1.729 filas/s), así que solo conviene si `medir` la muestra más rápida. Para adoptarla en una tabla: `tablas: {TERCEROS: {escritura: valores}}` en `config.local.yaml`. La fase con menos filas/s es el cuello de botella; el tiempo total estimado es `filas_totales / filas_por_segundo`.
+
+Durante una carga real, el log muestra cada 30 s `n filas en staging | origen x f/s, conversión y f/s, escritura z f/s`, y el registro `FIN` (en `ERRORESPROCESO`) incluye `etapas=` y `fases=` con los segundos de cada una. Si una corrida parece detenida, en SQL Server:
+```sql
+SELECT r.session_id, r.status, r.command, r.wait_type, r.wait_time, r.blocking_session_id, r.cpu_time, r.reads, r.writes
+FROM sys.dm_exec_requests r WHERE r.session_id <> @@SPID AND r.database_id = DB_ID('vigia');
+```
+`blocking_session_id` distinto de 0 = bloqueada por otra sesión (p. ej. una corrida anterior interrumpida que dejó una transacción abierta); Mientras corre `medir` o una carga, la misma consulta indica qué espera el servidor: `ASYNC_NETWORK_IO` = espera al cliente/red; `WRITELOG` o `PAGEIOLATCH_*` = disco del servidor; `wait_type` vacío con CPU alta = trabajo del servidor. `wait_type` `ASYNC_NETWORK_IO` = SQL Server espera al cliente (lectura del origen o Python lentos).
+
 ## 9. Solución de problemas
 
 | Síntoma | Causa probable y acción |
@@ -221,3 +325,18 @@ Esta versión se probó con bases simuladas (SQLite), no contra iSeries ni SQL S
 
 El detalle está en `PLAN_DESARROLLO.md`.
 
+
+
+## Panel de seguimiento al iniciar Windows
+El instalador (ejecutado **como administrador**) registra la tarea programada `ETL_VIGIA_Panel`: se dispara **al iniciar el sistema**, sin
+sesión de usuario (cuenta SYSTEM), ejecuta `etl_vigia.cmd panel` y se reinicia hasta 5 veces si falla. Escucha solo en `127.0.0.1:8765`
+(`http://127.0.0.1:8765/`) y su salida queda en `logs\panel.log`. Es de solo lectura y liviano. La cuenta SYSTEM no tiene credenciales de
+Windows hacia SQL Server: use usuario SQL en `.env`.
+
+```
+Instalar_etl_vigia_py.ps1 -PuertoPanel 9000   (otro puerto)
+Instalar_etl_vigia_py.ps1 -SinPanel           (no registrar la tarea)
+Instalar_etl_vigia_py.ps1 -QuitarPanel        (eliminar la tarea)
+```
+Al actualizar, el instalador detiene el panel antes de copiar y lo vuelve a iniciar. Para verlo desde otro equipo hay que ejecutar el panel
+con `--host 0.0.0.0` solo si la red es de confianza.

@@ -14,11 +14,20 @@ parametros:
   PROD_A: "31,71,114,4,14,15,16,27,30,32,33,81,82,85,86,87,92,94,101,113,128,129,130,277,332,334,350"
   PROD_B: "35,22,225"
 
-# Orden de carga (equivale a MASTER_ETL del SSIS).
-orden: [TERCEROS, DATOSADICIONALES, PRODUCTOS, TIPSTRAN, TRANSACCIONES]
+# Orden de carga de "todas" (TIPSTRAN primero, por decisión del usuario; el MASTER_ETL del SSIS lo ejecutaba cuarto).
+orden: [TIPSTRAN, TERCEROS, DATOSADICIONALES, PRODUCTOS, TRANSACCIONES]
 
 # Staging: por defecto es una tabla temporal creada con la estructura de la tabla destino
 # (no hay que crear tablas STG_*). Para usar una tabla fija: staging: VIGIA.STG_X
+# Promoción TMP_* -> tabla definitiva (comando `promover`): reemplaza el procedimiento VIGIA.PR_CARGATRANSACCIONES.
+promociones:
+  TRANSACCIONES:
+    origen: VIGIA.TMP_TRANSACCIONES
+    destino: VIGIA.TRANSACCIONES
+    lote: 50000               # filas por transacción de inserción (si un lote falla por datos se parte hasta aislar la fila)
+    alertas: true             # alerta inicial + correo si el tercero está en una lista restrictiva (DEFINICIONALERTAS 42 = 'S')
+    borrar_promovidas: true   # al final borra de TMP lo que ya está en la definitiva
+
 tablas:
   TERCEROS:
     sql: sql/origen/terceros.sql
@@ -50,6 +59,14 @@ tablas:
     sql: sql/origen/transacciones.sql
     destino: VIGIA.TMP_TRANSACCIONES
     contar_origen: false
+    # Filtro por fecha sobre psa067fc (columna FECHA del resultado) y lectura por particiones: ver el manual.
+    # subcolumna: con 'lectores' > 1 y pocas fechas (p. ej. una sola), cada fecha se reparte entre los lectores
+    # por el resto de psa067co (CONSECUTIVO, que está en el resultado: las filas repetidas caen juntas).
+    particion: {tabla: gnbweb_db.psa067, columna: psa067fc, subcolumna: psa067co}
+    # Sin parámetros de fecha se lee TODA la tabla de origen (se asume que ya contiene solo lo que hay que transmitir).
+    # Para acotar: --fecha / --desde --hasta / --mes en la línea de comandos, o fecha_defecto: ayer|hoy en config.local.yaml.
+    fecha_defecto: ninguna
+    permitir_origen_vacio: true      # origen sin filas deja TMP vacía en vez de abortar
     fechas: [FECHA]
     # Conversión pedida en el SSIS: PRODUCTO_NUMERO a string(20) e INTERMEDIARIO_CODIGO a string(30).
     a_texto: [PRODUCTO_NUMERO, INTERMEDIARIO_CODIGO, SUCURSAL_CODIGO]

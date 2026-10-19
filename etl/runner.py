@@ -83,7 +83,7 @@ def duracion_iso(segundos):
 
 
 def ejecutar_tabla(cfg, nombre, dry_run=False, forzar=False, corrida=None, limpiar=None, desde_todas=False,
-                   id_padre=None):
+                   id_padre=None, fechas=None):
     log = crear_logger(cfg, "main")
     corrida = corrida or nueva_corrida()
     try:
@@ -103,7 +103,7 @@ def ejecutar_tabla(cfg, nombre, dry_run=False, forzar=False, corrida=None, limpi
                                   pn)
                 registrar_ejecucion(destino, log, tabla.nombre, f"INICIO corrida={corrida}")
                 try:
-                    r = ejecutar_snapshot(cfg, tabla, origen, destino, log, dry_run, forzar, est)
+                    r = ejecutar_snapshot(cfg, tabla, origen, destino, log, dry_run, forzar, est, fechas)
                 except Aborto as e:
                     log.error("ABORTADO: %s", e)
                     registrar_proceso(cfg, destino, log, tabla.destino, "ABORTADO", f"corrida={corrida} {tabla.nombre}: {e}", pn)
@@ -130,6 +130,15 @@ def ejecutar_tabla(cfg, nombre, dry_run=False, forzar=False, corrida=None, limpi
                 if destino is not None:
                     msg = (f"corrida={corrida} {tabla.nombre}: estado={fin['estado']} "
                            f"duracion={duracion_iso(time.monotonic() - t0)}")
+                    # Tiempo por etapa y por fase de la carga (dónde se va el tiempo), solo nombres y segundos.
+                    etapas = ";".join(f"{k.replace(' ', '_')}:{v / 1000:.0f}s" for k, v in est.get("ms", {}).items())
+                    fases = ";".join(f"{k}:{v:.0f}s" for k, v in est.get("fases_s", {}).items())
+                    if est.get("fechas"):
+                        msg += f" fechas={est['fechas'].replace(' ', '')}"
+                    if etapas:
+                        msg += f" etapas={etapas}"
+                    if fases:
+                        msg += f" fases={fases}"
                     log.info("FIN %s", msg)
                     registrar_proceso(cfg, destino, log, tabla.destino, "FIN", msg, pn)
                     registrar_ejecucion(destino, log, tabla.nombre, "FIN " + msg.replace(f"{tabla.nombre}: ", "", 1))
@@ -148,7 +157,7 @@ def ejecutar_tabla(cfg, nombre, dry_run=False, forzar=False, corrida=None, limpi
         return 1
 
 
-def ejecutar_todas(cfg, dry_run=False, forzar=False, detener_en_error=True, limpiar=None):
+def ejecutar_todas(cfg, dry_run=False, forzar=False, detener_en_error=True, limpiar=None, fechas=None):
     """Corre las tablas en cfg.orden. Devuelve (codigo_salida, [(tabla, codigo)])."""
     log = crear_logger(cfg, "main")
     corrida = nueva_corrida()
@@ -158,7 +167,8 @@ def ejecutar_todas(cfg, dry_run=False, forzar=False, detener_en_error=True, limp
     resumen, tiempos = [], []
     for nombre in cfg.orden:
         t1 = time.monotonic()
-        codigo = ejecutar_tabla(cfg, nombre, dry_run, forzar, corrida, desde_todas=True, id_padre=ej.id)
+        codigo = ejecutar_tabla(cfg, nombre, dry_run, forzar, corrida, desde_todas=True, id_padre=ej.id,
+                                fechas=fechas)
         tiempos.append(f"{nombre}:{duracion_iso(time.monotonic() - t1)}")
         resumen.append((nombre, codigo))
         if codigo != 0 and detener_en_error:
